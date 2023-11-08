@@ -1,0 +1,30 @@
+package mux41;
+
+import org.apache.jena.query.Query;
+import org.apache.jena.rdf.model.Model;
+import org.apache.jena.sparql.core.TriplePath;
+import org.apache.jena.sparql.core.Var;
+
+import java.util.*;
+
+public class MM {
+
+    private final List<TriplePath> triplePaths = new ArrayList<>();
+    private final List<TriplePath> groundedTriplePaths = new ArrayList<>();
+    private final Map<Var, Object> literalBindings = new HashMap<>();
+    private final Map<Var, Set<String>> acceptedRdfClasses = new HashMap<>();
+    private final Query query;
+
+    public MM(Query query) {
+        this.query = Test3.processQuery(query, triplePaths, groundedTriplePaths, literalBindings, acceptedRdfClasses);
+    }
+
+    public Test3.MatchResult match(Model data) {
+        return Test3.match(data, triplePaths, groundedTriplePaths, acceptedRdfClasses, literalBindings);
+    }
+
+    public Model alignData(Model data, Test3.MatchResult result) {
+        return Test3.alignData(data, result.getBinding());
+    }
+
+}
