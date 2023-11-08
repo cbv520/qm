@@ -56,9 +56,13 @@ public class Test3 {
         }
     }
 
-    public static MatchResult match(Query query, Model data, List<TriplePath> tps, List<TriplePath> gtps, Map<Var, Object> literalBindings) {
+    public static MatchResult match(
+            Model data, 
+            List<TriplePath> tps, 
+            List<TriplePath> gtps, 
+            Map<Var, Set<String>> queryClasses,
+            Map<Var, Object> literalBindings) {
         var dataClasses = getRdfClasses(data);
-        var queryClasses = getAcceptedRdfClasses(query);
         var ctx = createExecutionContext(data);
         var bindingSets = getPossibleBindings(tps, ctx, queryClasses, dataClasses);
         System.out.println(bindingSets);
