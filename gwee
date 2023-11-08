@@ -42,7 +42,7 @@ public class Test3 {
     public static class MatchResult {
         private double coverage;
         private Model model;
-        private Binding binding;
+        private Map<Node, Var> binding;
         private Map<String, Object> literalBindings;
 
         @Override
@@ -56,22 +56,22 @@ public class Test3 {
         }
     }
 
-    public static MatchResult match(Query q, Model data, List<TriplePath> tps, Map<Var, Object> literalBindings) {
+    public static MatchResult match(Query query, Model data, List<TriplePath> tps, List<TriplePath> gtps, Map<Var, Object> literalBindings) {
         var dataClasses = getRdfClasses(data);
-        var queryClasses = getAcceptedRdfClasses(q);
+        var queryClasses = getAcceptedRdfClasses(query);
         var ctx = createExecutionContext(data);
         var bindingSets = getPossibleBindings(tps, ctx, queryClasses, dataClasses);
         System.out.println(bindingSets);
         //var bopt = optimise(bindingSets, queryClasses, dataClasses);
         System.out.println(bindingSets);
-        var best = getBestCoverage(tps, bindingSets, ctx);
+        var best = getBestCoverage(gtps, bindingSets, data);
         System.out.println(best);
-        return new MatchResult(best.getCoverage(), alignData(data, best.getBinding()), best.getBinding(), getLiteralBindings(best.getBinding(), literalBindings));
+        return new MatchResult(best.getCoverage(), best.getModel(), best.getBinding(), getLiteralBindings(best.getBinding(), literalBindings));
     }
 
-    public static Map<String, Object> getLiteralBindings(Binding binding, Map<Var, Object> literalBindings) {
+    public static Map<String, Object> getLiteralBindings(Map<Node, Var> binding, Map<Var, Object> literalBindings) {
         Map<String, Object> nodeToLiteralMapping = new HashMap<>();
-        binding.forEach((var, node) -> {
+        binding.forEach((node, var) -> {
             if (node.isURI()) {
                 var val = literalBindings.get(var);
                 if (val != null) {
@@ -82,7 +82,12 @@ public class Test3 {
         return nodeToLiteralMapping;
     }
 
-    public static Query processQuery(Query query, List<TriplePath> queryTriples, Map<Var, Object> literalBindings, Map<Var, Set<String>> acceptedRdfClasses) {
+    public static Query processQuery(
+            Query query,
+            List<TriplePath> queryTriples,
+            List<TriplePath> groundedQueryTriples,
+            Map<Var, Object> literalBindings,
+            Map<Var, Set<String>> acceptedRdfClasses) {
         String varSuffix = "_" + UUID.randomUUID().toString().substring(24);
         Map<Node, Var> anonVarReplacements = new HashMap<>();
 
@@ -97,7 +102,10 @@ public class Test3 {
                 .map(tp -> renameVars(tp, varReplacementNames))
                 .map(tp -> removeAnonVars(tp, anonVarReplacements))
                 .map(tp -> replaceLiteral(tp, literalBindings))
-                .forEach(queryTriples::add);
+                .forEach(tp -> {
+                    queryTriples.add(tp);
+                    groundedQueryTriples.add(groundTriplePath(tp));
+                });
 
         query = QueryFactory.create();
         query.setQuerySelectType();
@@ -113,10 +121,10 @@ public class Test3 {
         return query;
     }
 
-    public static Model alignData(Model data, Binding binding) {
+    public static Model alignData(Model data, Map<Node, Var> binding) {
         Map<Node, Node> dataToQueryMapping = new HashMap<>();
-        binding.forEach((var, node) -> {
-            dataToQueryMapping.put(node, ResourceFactory.createResource("http://vars#" + var.getVarName()).asNode());
+        binding.forEach((node, var) -> {
+            dataToQueryMapping.put(node, ResourceFactory.createResource("http://vars#" + var.getName()).asNode());
         });
         var tAligned = data.getGraph().stream()
                 .map(t -> new Triple(
@@ -130,37 +138,41 @@ public class Test3 {
         return ModelFactory.createModelForGraph(gAligned);
     }
 
-    public static CoverageResult getBestCoverage(List<TriplePath> tps, Map<Var, Set<Node>> bindings, ExecutionContext ctx) {
+    public static CoverageResult getBestCoverage(List<TriplePath> gtps, Map<Node, Set<Var>> bindings, Model data) {
         int maxIters = 1000;
         var bindingIter = new BindingIter(bindings);
         double bestCoverage = -1;
-        Binding bestBinding = null;
+        Map<Node, Var> bestBinding = null;
+        Model bestData = null;
         int i = 0;
         while (bindingIter.hasNext()) {
             if (++i > maxIters) {
                 break;
             }
             var binding = bindingIter.next();
-            var cvg = coverage(tps, binding, ctx);
+            var alignedData = alignData(data, binding);
+            var ctx = createExecutionContext(alignedData);
+            var cvg = coverage(gtps, ctx);
             if (cvg == 1.0) {
-                return new CoverageResult(binding, 1.0);
+                return new CoverageResult(binding, 1.0, alignedData);
             }
             if (cvg > bestCoverage) {
                 bestCoverage = cvg;
                 bestBinding = binding;
+                bestData = alignedData;
             }
         }
-        return new CoverageResult(bestBinding, bestCoverage);
+        return new CoverageResult(bestBinding, bestCoverage, bestData);
     }
 
-    public static double coverage(List<TriplePath> tps, Binding b, ExecutionContext ctx) {
+    public static double coverage(List<TriplePath> gtps, ExecutionContext ctx) {
         int matches = 0;
-        for (var tp : tps) {
-            if (PathLib.execTriplePath(b, groundTriplePath(tp), ctx).hasNext()) {
+        for (var tp : gtps) {
+            if (PathLib.execTriplePath(BindingRoot.create(), tp, ctx).hasNext()) {
                 matches++;
             }
         }
-        return (double) matches / tps.size();
+        return (double) matches / gtps.size();
     }
 
     public static Map<Var, Set<String>> getAcceptedRdfClasses(Query query) {
@@ -219,19 +231,19 @@ public class Test3 {
         return new ExecutionContext(DatasetGraphFactory.create(m.getGraph()));
     }
 
-    public static Map<Var, Set<Node>> getPossibleBindings(List<TriplePath> tps, ExecutionContext ctx, Map<Var, Set<String>> accepted, Map<String, String> outputTypes) {
-        Map<Var, Set<Node>> bindings = new HashMap<>();
+    public static Map<Node, Set<Var>> getPossibleBindings(List<TriplePath> tps, ExecutionContext ctx, Map<Var, Set<String>> accepted, Map<String, String> outputTypes) {
+        Map<Node, Set<Var>> bindings = new HashMap<>();
         for (var tp : tps) {
             var qIter = PathLib.execTriplePath(BindingRoot.create(), tp, ctx);
             while (qIter.hasNext()) {
                 var binding = qIter.next();
                 binding.forEach((var, node) -> {
                     if (rdfClassCompare(var, node, accepted, outputTypes) >= 0) {
-                        bindings.compute(var, (k, v) -> {
+                        bindings.compute(node, (k, v) -> {
                             if (v == null) {
                                 v = new HashSet<>();
                             }
-                            v.add(node);
+                            v.add(var);
                             return v;
                         });
                     }
@@ -368,22 +380,22 @@ public class Test3 {
         return Var.alloc("var_" + UUID.randomUUID().toString().substring(24));
     }
 
-    public static class BindingIter implements Iterator<Binding> {
+    public static class BindingIter implements Iterator<Map<Node, Var>> {
 
         private final CartesianProduct cpIter;
-        private final List<Var> vars;
-        private final List<List<Node>> nodes;
-        private final List<Binding> buffer;
+        private final List<Node> nodes;
+        private final List<List<Var>> vars;
+        private final List<Map<Node, Var>> buffer;
         private final Random random = new Random(123);
-        private Iterator<Binding> bufferIter;
+        private Iterator<Map<Node, Var>> bufferIter;
 
-        public BindingIter(Map<Var, Set<Node>> bb) {
-            this.vars = new ArrayList<>(bb.keySet());
-            this.nodes = bb.values().stream().map(ArrayList::new).collect(Collectors.toList());
+        public BindingIter(Map<Node, Set<Var>> bindingSets) {
+            this.nodes = new ArrayList<>(bindingSets.keySet());
+            this.vars = bindingSets.values().stream().map(ArrayList::new).collect(Collectors.toList());
             this.buffer = new ArrayList<>();
-            int[] lengths = new int[this.vars.size()];
-            for (int i = 0; i < this.vars.size(); i++) {
-                lengths[i] = nodes.get(i).size();
+            int[] lengths = new int[this.nodes.size()];
+            for (int i = 0; i < this.nodes.size(); i++) {
+                lengths[i] = vars.get(i).size();
             }
             this.cpIter = new CartesianProduct(lengths);
             bufferAndShuffle();
@@ -393,12 +405,12 @@ public class Test3 {
             buffer.clear();
             int n = 0;
             while (cpIter.hasNext() && n < 1000) {
-                var bindingBuilder = BindingBuilder.create();
+                Map<Node, Var> binding = new HashMap<>();
                 var next = cpIter.next();
                 for (int i = 0; i < next.length; i++) {
-                    bindingBuilder.add(vars.get(i), nodes.get(i).get(next[i]));
+                    binding.put(nodes.get(i), vars.get(i).get(next[i]));
                 }
-                buffer.add(bindingBuilder.build());
+                buffer.add(binding);
                 n++;
             }
             Collections.shuffle(buffer, random);
@@ -417,7 +429,7 @@ public class Test3 {
         }
 
         @Override
-        public Binding next() {
+        public Map<Node, Var> next() {
             return bufferIter.next();
         }
     }
@@ -464,8 +476,9 @@ public class Test3 {
     @Data
     @AllArgsConstructor
     public static class CoverageResult {
-        Binding binding;
+        Map<Node, Var> binding;
         double coverage;
+        Model model;
     }
 
     public static Model model(String str) {
