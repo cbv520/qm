@@ -2,12 +2,16 @@ package mux41;
 
 import lombok.AllArgsConstructor;
 import lombok.Data;
+import org.apache.jena.graph.Graph;
 import org.apache.jena.graph.Node;
+import org.apache.jena.graph.Triple;
 import org.apache.jena.query.Query;
 import org.apache.jena.query.QueryFactory;
 import org.apache.jena.rdf.model.Model;
 import org.apache.jena.rdf.model.ModelFactory;
 import org.apache.jena.rdf.model.ResourceFactory;
+import org.apache.jena.sparql.ARQConstants;
+import org.apache.jena.sparql.algebra.Algebra;
 import org.apache.jena.sparql.core.DatasetGraphFactory;
 import org.apache.jena.sparql.core.PathBlock;
 import org.apache.jena.sparql.core.TriplePath;
@@ -16,6 +20,8 @@ import org.apache.jena.sparql.engine.ExecutionContext;
 import org.apache.jena.sparql.engine.binding.Binding;
 import org.apache.jena.sparql.engine.binding.BindingBuilder;
 import org.apache.jena.sparql.engine.binding.BindingRoot;
+import org.apache.jena.sparql.engine.main.VarFinder;
+import org.apache.jena.sparql.graph.GraphFactory;
 import org.apache.jena.sparql.path.PathLib;
 import org.apache.jena.sparql.syntax.Element;
 import org.apache.jena.sparql.syntax.ElementGroup;
@@ -24,18 +30,116 @@ import org.apache.jena.sparql.syntax.ElementPathBlock;
 import org.apache.jena.vocabulary.RDF;
 
 import java.io.ByteArrayInputStream;
+import java.io.ByteArrayOutputStream;
 import java.util.*;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
-public class Test2 {
+public class Test3 {
 
+    @Data
+    @AllArgsConstructor
+    public static class MatchResult {
+        private double coverage;
+        private Model model;
+        private Binding binding;
+        private Map<String, Object> literalBindings;
 
-    public static CoverageResult getBestCoverage(List<TriplePath> tps, Map<Var, List<Node>> bindings, ExecutionContext ctx) {
+        @Override
+        public String toString() {
+            return "MatchResult{" +
+                    "coverage=" + coverage +
+                    ", model=" + serialize(model) +
+                    ", binding=" + binding +
+                    ", literalBindings=" + literalBindings +
+                    '}';
+        }
+    }
+
+    public static MatchResult match(Query q, Model data, List<TriplePath> tps, Map<Var, Object> literalBindings) {
+        var dataClasses = getRdfClasses(data);
+        var queryClasses = getAcceptedRdfClasses(q);
+        var ctx = createExecutionContext(data);
+        var bindingSets = getPossibleBindings(tps, ctx, queryClasses, dataClasses);
+        System.out.println(bindingSets);
+        //var bopt = optimise(bindingSets, queryClasses, dataClasses);
+        System.out.println(bindingSets);
+        var best = getBestCoverage(tps, bindingSets, ctx);
+        System.out.println(best);
+        return new MatchResult(best.getCoverage(), alignData(data, best.getBinding()), best.getBinding(), getLiteralBindings(best.getBinding(), literalBindings));
+    }
+
+    public static Map<String, Object> getLiteralBindings(Binding binding, Map<Var, Object> literalBindings) {
+        Map<String, Object> nodeToLiteralMapping = new HashMap<>();
+        binding.forEach((var, node) -> {
+            if (node.isURI()) {
+                var val = literalBindings.get(var);
+                if (val != null) {
+                    nodeToLiteralMapping.put(node.getURI(), val);
+                }
+            }
+        });
+        return nodeToLiteralMapping;
+    }
+
+    public static Query processQuery(Query query, List<TriplePath> queryTriples, Map<Var, Object> literalBindings, Map<Var, Set<String>> acceptedRdfClasses) {
+        String varSuffix = "_" + UUID.randomUUID().toString().substring(24);
+        Map<Node, Var> anonVarReplacements = new HashMap<>();
+
+        var varFinder = VarFinder.process(Algebra.compile(query.getQueryPattern()));
+        var varReplacementNames = varFinder.getFixed().stream()
+                .collect(Collectors.toMap(
+                        Var::asNode,
+                        e -> Var.alloc(e.getVarName() + varSuffix).asNode()
+                ));
+
+        streamQueryTriplePaths(query)
+                .map(tp -> renameVars(tp, varReplacementNames))
+                .map(tp -> removeAnonVars(tp, anonVarReplacements))
+                .map(tp -> replaceLiteral(tp, literalBindings))
+                .forEach(queryTriples::add);
+
+        query = QueryFactory.create();
+        query.setQuerySelectType();
+        query.setQueryResultStar(true);
+        var el = new ElementGroup();
+        query.setQueryPattern(el);
+        var pb = new PathBlock();
+        queryTriples.forEach(pb::add);
+        el.addElement(new ElementPathBlock(pb));
+
+        acceptedRdfClasses.putAll(getAcceptedRdfClasses(query));
+
+        return query;
+    }
+
+    public static Model alignData(Model data, Binding binding) {
+        Map<Node, Node> dataToQueryMapping = new HashMap<>();
+        binding.forEach((var, node) -> {
+            dataToQueryMapping.put(node, ResourceFactory.createResource("http://vars#" + var.getVarName()).asNode());
+        });
+        var tAligned = data.getGraph().stream()
+                .map(t -> new Triple(
+                        replaceNode(t.getSubject(), dataToQueryMapping),
+                        replaceNode(t.getPredicate(), dataToQueryMapping),
+                        replaceNode(t.getObject(), dataToQueryMapping)
+                ))
+                .collect(Collectors.toList());
+        Graph gAligned = GraphFactory.createDefaultGraph();
+        tAligned.forEach(gAligned::add);
+        return ModelFactory.createModelForGraph(gAligned);
+    }
+
+    public static CoverageResult getBestCoverage(List<TriplePath> tps, Map<Var, Set<Node>> bindings, ExecutionContext ctx) {
+        int maxIters = 1000;
         var bindingIter = new BindingIter(bindings);
         double bestCoverage = -1;
         Binding bestBinding = null;
+        int i = 0;
         while (bindingIter.hasNext()) {
+            if (++i > maxIters) {
+                break;
+            }
             var binding = bindingIter.next();
             var cvg = coverage(tps, binding, ctx);
             if (cvg == 1.0) {
@@ -52,7 +156,7 @@ public class Test2 {
     public static double coverage(List<TriplePath> tps, Binding b, ExecutionContext ctx) {
         int matches = 0;
         for (var tp : tps) {
-            if (PathLib.execTriplePath(b, tp, ctx).hasNext()) {
+            if (PathLib.execTriplePath(b, groundTriplePath(tp), ctx).hasNext()) {
                 matches++;
             }
         }
@@ -115,20 +219,22 @@ public class Test2 {
         return new ExecutionContext(DatasetGraphFactory.create(m.getGraph()));
     }
 
-    public static Map<Var, Set<Node>> getPossibleBindings(List<TriplePath> tps, ExecutionContext ctx) {
+    public static Map<Var, Set<Node>> getPossibleBindings(List<TriplePath> tps, ExecutionContext ctx, Map<Var, Set<String>> accepted, Map<String, String> outputTypes) {
         Map<Var, Set<Node>> bindings = new HashMap<>();
         for (var tp : tps) {
             var qIter = PathLib.execTriplePath(BindingRoot.create(), tp, ctx);
             while (qIter.hasNext()) {
                 var binding = qIter.next();
                 binding.forEach((var, node) -> {
-                    bindings.compute(var, (k,v) -> {
-                        if (v == null) {
-                            v = new HashSet<>();
-                        }
-                        v.add(node);
-                        return v;
-                    });
+                    if (rdfClassCompare(var, node, accepted, outputTypes) >= 0) {
+                        bindings.compute(var, (k, v) -> {
+                            if (v == null) {
+                                v = new HashSet<>();
+                            }
+                            v.add(node);
+                            return v;
+                        });
+                    }
                 });
             }
         }
@@ -136,9 +242,13 @@ public class Test2 {
     }
 
     public static List<TriplePath> getQueryTriplePaths(Query query) {
-        return streamQueryPathBlocks(query)
-                .flatMap(pb -> pb.getList().stream())
+        return streamQueryTriplePaths(query)
                 .collect(Collectors.toList());
+    }
+
+    public static Stream<TriplePath> streamQueryTriplePaths(Query query) {
+        return streamQueryPathBlocks(query)
+                .flatMap(pb -> pb.getList().stream());
     }
 
     public static Stream<PathBlock> streamQueryPathBlocks(Query query) {
@@ -151,12 +261,111 @@ public class Test2 {
         }
         if (el instanceof ElementGroup) {
             return ((ElementGroup) el).getElements().stream()
-                    .flatMap(Test2::streamQueryPathBlocks);
+                    .flatMap(Test3::streamQueryPathBlocks);
         }
         if (el instanceof ElementOptional) {
             return streamQueryPathBlocks(((ElementOptional) el).getOptionalElement());
         }
         return Stream.empty();
+    }
+
+    public static TriplePath removeAnonVars(TriplePath t, Map<Node, Var> anonVarReplacements) {
+        if (t.isTriple()) {
+            return new TriplePath(new Triple(
+                    removeAnonVars(t.getSubject(), anonVarReplacements),
+                    removeAnonVars(t.getPredicate(), anonVarReplacements),
+                    removeAnonVars(t.getObject(), anonVarReplacements)
+            ));
+        } else {
+            return new TriplePath(
+                    removeAnonVars(t.getSubject(), anonVarReplacements),
+                    t.getPath(),
+                    removeAnonVars(t.getObject(), anonVarReplacements)
+            );
+        }
+    }
+
+    public static Node removeAnonVars(Node n, Map<Node, Var> anonVarReplacements) {
+        if (n.isVariable() && n.getName().startsWith(ARQConstants.allocVarAnonMarker)) {
+            var existingReplacement = anonVarReplacements.get(n);
+            if (existingReplacement != null) {
+                return existingReplacement;
+            }
+            var var = allocVar();
+            anonVarReplacements.put(n, var);
+            return var;
+        }
+        return n;
+    }
+
+    public static TriplePath replaceLiteral(TriplePath t, Map<Var, Object> literalBindings) {
+        Node o = t.getObject();
+
+        if (o.isLiteral()) {
+            var literalValue = o.getLiteral().getValue();
+            var var = literalBindings.entrySet().stream()
+                    .filter(e -> e.getValue() != null && e.getValue().equals(literalValue))
+                    .findAny()
+                    .map(Map.Entry::getKey)
+                    .orElseGet(QueryMatch::allocVar);
+            literalBindings.put(var, literalValue);
+            if (t.isTriple()) {
+                return new TriplePath(new Triple(t.getSubject(), t.getPredicate(), var));
+            } else {
+                return new TriplePath(t.getSubject(), t.getPath(), var);
+            }
+        }
+
+        return t;
+    }
+
+    private static TriplePath renameVars(TriplePath t, Map<Node, Node> replacements) {
+        if (t.isTriple()) {
+            return new TriplePath(new Triple(
+                    replaceNode(t.getSubject(), replacements),
+                    replaceNode(t.getPredicate(), replacements),
+                    replaceNode(t.getObject(), replacements)));
+        } else {
+            return new TriplePath(
+                replaceNode(t.getSubject(), replacements),
+                t.getPath(),
+                replaceNode(t.getObject(), replacements));
+        }
+    }
+
+    public static TriplePath groundTriplePath(TriplePath tp) {
+        if (tp.isTriple()) {
+            return new TriplePath(new Triple(
+                    groundVar(tp.getSubject()),
+                    groundVar(tp.getPredicate()),
+                    groundVar(tp.getObject())
+            ));
+        } else {
+            return new TriplePath(
+                    groundVar(tp.getSubject()),
+                    tp.getPath(),
+                    groundVar(tp.getObject())
+            );
+        }
+    }
+
+    public static Node groundVar(Node n) {
+        if (n.isVariable()) {
+            return ResourceFactory.createResource("http://vars#" + n.getName()).asNode();
+        }
+        return n;
+    }
+
+    private static Node replaceNode(Node n, Map<Node, Node> rename) {
+        var newVar = rename.get(n);
+        if (newVar != null) {
+            return newVar;
+        }
+        return n;
+    }
+
+    public static Var allocVar() {
+        return Var.alloc("var_" + UUID.randomUUID().toString().substring(24));
     }
 
     public static class BindingIter implements Iterator<Binding> {
@@ -168,7 +377,7 @@ public class Test2 {
         private final Random random = new Random(123);
         private Iterator<Binding> bufferIter;
 
-        public BindingIter(Map<Var, List<Node>> bb) {
+        public BindingIter(Map<Var, Set<Node>> bb) {
             this.vars = new ArrayList<>(bb.keySet());
             this.nodes = bb.values().stream().map(ArrayList::new).collect(Collectors.toList());
             this.buffer = new ArrayList<>();
@@ -263,5 +472,11 @@ public class Test2 {
         var model = ModelFactory.createDefaultModel();
         model.read(new ByteArrayInputStream(str.getBytes()), null, "TTL");
         return model;
+    }
+
+    public static String serialize(Model model) {
+        ByteArrayOutputStream baos = new ByteArrayOutputStream();
+        model.write(baos, "TTL", null);
+        return baos.toString();
     }
 }
