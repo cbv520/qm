@@ -24,17 +24,17 @@ public static void findBestBinding(List<TriplePath> gtps, Model data, Map<Node, 
                 globalCoverage = coverage(gtps, createExecutionContext(globalData));
                 continue;
             }
-            double best = -1.0;
+            double bestCvg = 0.0;
             int bestIdx = 0;
             int i = 0;
-            for (var f : bindingsForNode) {
+            for (var var : bindingsForNode) {
                 var binding = new HashMap<>(globalBinding);
-                binding.put(node, f);
+                binding.put(node, var);
                 var alignedData = alignData(data, binding);
                 var ctx = createExecutionContext(alignedData);
                 var cvg = coverage(gtps, ctx);
-                if (cvg > best) {
-                    best = cvg;
+                if (cvg > bestCvg) {
+                    bestCvg = cvg;
                     bestIdx = i;
                     if (cvg > globalCoverage) {
                         globalCoverage = cvg;
