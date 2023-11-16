@@ -1,0 +1,62 @@
+
+    public static Map<Node, Set<Var>> poss(List<TriplePath> tps, ExecutionContext ctx, Binding b) {
+        boolean bindingsUpdated;
+        do {
+            bindingsUpdated = false;
+            for (var tp : tps) {
+                var qIter = PathLib.execTriplePath(b, tp, ctx);
+                int i = 0;
+                Binding bindingForTriple = null;
+                while (qIter.hasNext()) {
+                    i++;
+                    bindingForTriple = qIter.next();
+                }
+                if (i == 1) {
+                    if (!b.equals(bindingForTriple)) {
+                        bindingsUpdated = true;
+                        b = bindingForTriple;
+                    }
+                }
+            }
+        } while (bindingsUpdated);
+
+
+        var minPossibleBindings = Integer.MAX_VALUE;
+        List<Binding> mostLikelyBindings = new ArrayList<>();
+        Map<Node, Set<Var>> possibleBindings = new HashMap<>();
+
+        for (var tp : tps) {
+            var qIter = PathLib.execTriplePath(b, tp, ctx);
+            int nBindingsForTriple = 0;
+            List<Binding> possibleBindingsForTriple = new ArrayList<>();
+            while (qIter.hasNext()) {
+                nBindingsForTriple++;
+                var binding = qIter.next();
+                possibleBindingsForTriple.add(binding);
+                binding.forEach((var, node) -> possibleBindings.computeIfAbsent(node, k -> new HashSet<>()).add(var));
+            }
+            if (nBindingsForTriple > 1) {
+                if (nBindingsForTriple == minPossibleBindings) {
+                    mostLikelyBindings.addAll(possibleBindingsForTriple);
+                } else if (nBindingsForTriple < minPossibleBindings) {
+                    minPossibleBindings = nBindingsForTriple;
+                    mostLikelyBindings = possibleBindingsForTriple;
+                }
+            }
+
+        }
+
+        Map<Node, Set<Var>> resultPossibleBindings = new HashMap<>();
+        for (var binding : mostLikelyBindings) {
+            if (binding.size() > b.size()) {
+                var newPossibleBindings = poss(tps, ctx, binding);
+                newPossibleBindings.forEach((node, vars) -> resultPossibleBindings.computeIfAbsent(node, k -> new HashSet<>()).addAll(vars));
+            }
+        }
+
+        if (resultPossibleBindings.isEmpty()) {
+            resultPossibleBindings.putAll(possibleBindings);
+        }
+
+        return resultPossibleBindings;
+    }
