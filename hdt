@@ -1,0 +1,159 @@
+package mux41;
+
+import org.apache.jena.graph.Graph;
+import org.apache.jena.rdf.model.Model;
+import org.apache.jena.rdf.model.ModelFactory;
+import org.rdfhdt.hdt.enums.CompressionType;
+import org.rdfhdt.hdt.enums.RDFNotation;
+import org.rdfhdt.hdt.exceptions.ParserException;
+import org.rdfhdt.hdt.hdt.HDTManager;
+import org.rdfhdt.hdt.rdf.parsers.JenaNodeFormatter;
+import org.rdfhdt.hdt.triples.TripleString;
+import org.rdfhdt.hdtjena.HDTGraph;
+import virtuoso.jena.driver.VirtDataset;
+
+import java.io.*;
+import java.nio.charset.StandardCharsets;
+import java.util.zip.DeflaterOutputStream;
+import java.util.zip.InflaterInputStream;
+
+public class HDT {
+
+    public static void main(String[] args) {
+        var model = deserializeStr(data);
+        var hdt = serializeHdt(model.getGraph());
+        model = deserializeHdt(hdt);
+
+//        VirtDataset vds = new VirtDataset("jdbc:virtuoso://localhost:1111", "dba", "dba");
+//        var vm = vds.getNamedModel("http://gard");
+//        if (vm.size() < 1) {
+//            vm.add(model);
+//        }
+
+//        System.out.println(JenaHDT.namespace("hhttp://saddfjkla/jfdsk"));
+//        System.out.println(JenaHDT.namespace("hhttp://saddfjkla#jfdsk"));
+//        System.out.println(JenaHDT.namespace("hhttp://saddfjklajfdsk"));
+//        System.out.println(JenaHDT.namespace("hhttp"));
+//
+//        System.out.println(JenaHDT.localname("hhttp://saddfjkla/jfdsk"));
+//        System.out.println(JenaHDT.localname("hhttp://saddfjkla#jfdsk"));
+//        System.out.println(JenaHDT.localname("hhttp://saddfjklajfdsk"));
+//        System.out.println(JenaHDT.localname("hhttp"));
+
+        var b = new JenaHDT(deserializeStr(data).getGraph()).hdt();
+        new JenaHDT(b);
+
+        System.out.println("ttl size = " + data.getBytes(StandardCharsets.UTF_8).length);
+        System.out.println("hdt size = " + hdt.length);
+        System.out.println("b size = " + b.length);
+        System.out.println("size %   = " + (double) hdt.length / data.getBytes(StandardCharsets.UTF_8).length);
+        System.out.println("size %   = " + (double) b.length / data.getBytes(StandardCharsets.UTF_8).length);
+
+
+        long t0;
+        int n = 50_000;
+        long r0;
+        long r1;
+        long r2;
+        long r3;
+        long r4;
+
+
+//        t0 = System.currentTimeMillis();
+//        for (int i = 0; i < n; i++) {
+//            var nm = ModelFactory.createDefaultModel();
+//            nm.add(vds.getNamedModel("http://gard"));
+//
+//        }
+//        System.out.println(r0 = System.currentTimeMillis() - t0);
+
+        t0 = System.currentTimeMillis();
+        for (int i = 0; i < n; i++) {
+            deserializeStr(data);
+        }
+        System.out.println(r1 = System.currentTimeMillis() - t0);
+
+
+        t0 = System.currentTimeMillis();
+        for (int i = 0; i < n; i++) {
+            deserializeHdt(serializeHdt(model.getGraph()));
+        }
+        System.out.println(r2 = System.currentTimeMillis() - t0);
+
+
+        t0 = System.currentTimeMillis();
+        for (int i = 0; i < n; i++) {
+            new JenaHDT(new JenaHDT(model.getGraph()).hdt());
+        }
+        System.out.println(r3 = System.currentTimeMillis() - t0);
+
+
+        t0 = System.currentTimeMillis();
+        for (int i = 0; i < n; i++) {
+            RdfUtils.deserializeHdt(RdfUtils.serializeHdt(model.getGraph()));
+        }
+        System.out.println(r4 = System.currentTimeMillis() - t0);
+
+        System.out.println("----");
+//
+//        System.out.println((double) r1/r0);
+        System.out.println((double) r2/r1);
+        System.out.println((double) r3/r1);
+        System.out.println((double) r4/r1);
+        System.out.println((double) r3/r2);
+
+//        model.listStatements().forEach(System.out::println);
+        //System.out.println(new String(hdt));
+
+        var bm = ModelFactory.createModelForGraph(new JenaHDT(b).getGraph());
+        System.out.println(bm.size());
+        System.out.println(model.size());
+        bm.listStatements().forEach(System.out::println);
+//        System.out.println(bm.remove(model).size());
+//        System.out.println(model.remove(bm).size());
+    }
+
+
+    static Model deserializeStr(String data) {
+        Model m = ModelFactory.createDefaultModel();
+        m.read(new ByteArrayInputStream(data.getBytes(StandardCharsets.UTF_8)), null, "TTL");
+        return m;
+    }
+
+
+    static String serializeStr(Model data) {
+        return data.toString();
+    }
+
+
+    static Model deserializeHdt(byte[] hdtBytes) {
+        try (ByteArrayInputStream bais = new ByteArrayInputStream(hdtBytes);
+             InflaterInputStream iis = new InflaterInputStream(bais);
+             BufferedInputStream in = new BufferedInputStream(iis);
+        ) {
+            var hdt = HDTManager.loadHDT(in);
+            return ModelFactory.createModelForGraph(new HDTGraph(hdt));
+        } catch (IOException e) {
+            throw new RuntimeException(e);
+        }
+    }
+
+    static byte[] serializeHdt(Graph g) {
+        try (ByteArrayOutputStream baos = new ByteArrayOutputStream();
+             DeflaterOutputStream out = new DeflaterOutputStream(baos)
+        ) {
+            var hdt = HDTManager.generateHDT(
+                    g.find().mapWith(t -> new TripleString(
+                            JenaNodeFormatter.format(t.getSubject()),
+                            JenaNodeFormatter.format(t.getPredicate()),
+                            JenaNodeFormatter.format(t.getObject())
+                    )),
+                    "null://null", null, null);
+            hdt.saveToHDT(out, null);
+            out.finish();
+            out.flush();
+            return baos.toByteArray();
+        } catch (IOException | ParserException e) {
+            throw new RuntimeException(e);
+        }
+    }
