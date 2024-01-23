@@ -1,0 +1,204 @@
+package mux41.ify;
+
+import com.google.common.collect.HashMultimap;
+import com.google.common.collect.Multimap;
+import lombok.extern.slf4j.Slf4j;
+import org.aksw.commons.collections.MapUtils;
+import org.aksw.commons.sql.codec.api.SqlCodec;
+import org.aksw.commons.sql.codec.util.SqlCodecUtils;
+import org.aksw.commons.util.MapReader;
+import org.aksw.commons.util.slf4j.LoggerCount;
+import org.aksw.jena_sparql_api.views.CandidateViewSelector;
+import org.aksw.jena_sparql_api.views.ExprEvaluator;
+import org.aksw.jena_sparql_api.views.SparqlifyConstants;
+import org.aksw.jena_sparql_api.views.SqlTranslationUtils;
+import org.aksw.sparqlify.algebra.sql.exprs2.*;
+import org.aksw.sparqlify.backend.postgres.DatatypeToStringPostgres;
+import org.aksw.sparqlify.config.syntax.Config;
+import org.aksw.sparqlify.config.v0_2.bridge.*;
+import org.aksw.sparqlify.config.xml.SparqlifyConfig;
+import org.aksw.sparqlify.core.TypeToken;
+import org.aksw.sparqlify.core.algorithms.CandidateViewSelectorSparqlify;
+import org.aksw.sparqlify.core.algorithms.DatatypeToString;
+import org.aksw.sparqlify.core.algorithms.ViewDefinitionNormalizerImpl;
+import org.aksw.sparqlify.core.builder.FluentSparqlifyFactory;
+import org.aksw.sparqlify.core.cast.*;
+import org.aksw.sparqlify.core.datatypes.SparqlFunction;
+import org.aksw.sparqlify.core.datatypes.SparqlFunctionImpl;
+import org.aksw.sparqlify.core.domain.input.ViewDefinition;
+import org.aksw.sparqlify.core.interfaces.MappingOps;
+import org.aksw.sparqlify.core.rewrite.expr.transform.RdfTermEliminatorWriteable;
+import org.aksw.sparqlify.core.sparql.QueryEx;
+import org.aksw.sparqlify.core.sparql.QueryExecutionFactoryEx;
+import org.aksw.sparqlify.core.sparql.QueryFactoryEx;
+import org.aksw.sparqlify.core.sql.expr.evaluation.*;
+import org.aksw.sparqlify.type_system.*;
+import org.aksw.sparqlify.util.*;
+import org.aksw.sparqlify.web.SparqlifyCliHelper;
+import org.apache.jena.datatypes.TypeMapper;
+import org.apache.jena.query.QueryExecution;
+import org.apache.jena.query.ResultSet;
+import org.apache.jena.query.ResultSetFormatter;
+import org.apache.jena.sparql.expr.aggregate.AggCount;
+import org.apache.jena.sparql.expr.aggregate.AggGroupConcat;
+import org.apache.jena.sparql.expr.aggregate.AggSum;
+import org.apache.jena.sparql.sse.Tags;
+import org.apache.jena.vocabulary.XSD;
+
+import javax.sql.DataSource;
+import java.sql.Connection;
+import java.sql.DatabaseMetaData;
+import java.util.List;
+import java.util.Map;
+
+@Slf4j
+public class abc {
+
+
+    public static ExprRewriteSystem createDefaultExprRewriteSystem() {
+        // SqlEscaper sqlEscaper = new SqlEscaperDoubleQuote();
+        SqlCodec sqlEscaper = SqlCodecUtils.createSqlCodecDefault();
+        DatatypeToString typeSerializer = new DatatypeToStringPostgres();
+        SparqlifyConfig sqlFunctionDefinitions = SparqlifyCoreInit.loadSqlFunctionDefinitions("functions.xml");
+        return createExprRewriteSystem(typeSerializer, sqlEscaper, sqlFunctionDefinitions);
+    }
+
+    public static ExprRewriteSystem createExprRewriteSystem(DatatypeToString typeSerializer, SqlCodec sqlEscaper, SparqlifyConfig sqlFunctionMapping) {
+
+        SparqlifyCoreInit.initSparqlifyFunctions();
+
+        TypeSystem typeSystem = SparqlifyCoreInit.createDefaultDatatypeSystem();
+        initSparqlModel(typeSystem);
+        RdfTermEliminatorWriteable exprTransformer = SparqlifyCoreInit.createDefaultTransformer(typeSystem);
+        SqlExprSerializerSystem serializerSystem = SparqlifyCoreInit.createSerializerSystem(typeSystem, typeSerializer, sqlEscaper);
+        ExprEvaluator exprEvaluator = SqlTranslationUtils.createDefaultEvaluator();
+
+        ExprRewriteSystem result = new ExprRewriteSystem(typeSystem, exprTransformer, exprEvaluator, serializerSystem);
+
+
+        SparqlifyCoreInit.loadExtensionFunctions(typeSystem, exprTransformer, serializerSystem, sqlFunctionMapping);
+
+        return result;
+    }
+
+    public static void initSparqlModel(TypeSystem typeSystem) {
+
+        FunctionModel<TypeToken> sqlModel = typeSystem.getSqlFunctionModel();
+
+
+        registerSqlOperatorBatchCompare(sqlModel, "lessThan");
+        registerSqlOperatorBatchCompare(sqlModel, "lessThanOrEqual");
+        registerSqlOperatorBatchCompare(sqlModel, "equal");
+        registerSqlOperatorBatchCompare(sqlModel, "greaterThan");
+        registerSqlOperatorBatchCompare(sqlModel, "greaterThanOrEqual");
+
+        registerSqlOperatorBatchNumeric(sqlModel, "numericPlus");
+        registerSqlOperatorBatchNumeric(sqlModel, "numericMinus");
+        registerSqlOperatorBatchNumeric(sqlModel, "numericMultiply");
+        registerSqlOperatorBatchNumeric(sqlModel, "numericDivide");
+
+    }
+
+
+
+    public static void registerSqlOperatorBatchCompare(FunctionModel<TypeToken> sqlModel, String name) {
+        sqlModel.registerFunction(name + "@int-er-1", name, MethodSignature.create(false, TypeToken.Boolean, TypeToken.TypeError, TypeToken.Int));
+        sqlModel.registerFunction(name + "@int-er-2", name, MethodSignature.create(false, TypeToken.Boolean, TypeToken.Int, TypeToken.TypeError));
+    }
+
+    public static void registerSqlOperatorBatchNumeric(FunctionModel<TypeToken> sqlModel, String name) {
+        sqlModel.registerFunction(name + "@int-er-1", name, MethodSignature.create(false, TypeToken.Int, TypeToken.Int, TypeToken.TypeError));
+        sqlModel.registerFunction(name + "@int-er-2", name, MethodSignature.create(false, TypeToken.Int, TypeToken.TypeError, TypeToken.Int));
+    }
+
+    private QueryExecutionFactoryEx qef;
+
+    public abc(DataSourceOptions dataSourceOptions, List<String> ss) throws Exception{
+
+        LoggerCount loggerCount = new LoggerCount(log);
+
+        var sources =  SparqlifyCliHelper.resolveFiles(ss, true, loggerCount);
+
+        Config config = SparqlifyCliHelper.parseSmlConfigs(sources, loggerCount);
+        if(loggerCount.getErrorCount() != 0) {
+            throw new RuntimeException("Encountered " + loggerCount.getErrorCount() + " errors that need to be fixed first.");
+        }
+
+        /*
+         * Connection Pool
+         */
+        DataSource dataSource = SparqlifyCliHelper.configDataSource(dataSourceOptions, loggerCount);
+        if(loggerCount.getErrorCount() != 0) {
+            throw new RuntimeException("Encountered " + loggerCount.getErrorCount() + " errors that need to be fixed first.");
+        } SparqlifyCoreInit.initSparqlifyFunctions();
+
+
+        ExprRewriteSystem ers = createDefaultExprRewriteSystem();
+        TypeSystem typeSystem = ers.getTypeSystem();
+
+        Map<String, String> typeAlias = MapReader.readFromResource("/type-map.h2.tsv");
+
+        String dbProductName;
+        try (Connection conn = dataSource.getConnection()) {
+            DatabaseMetaData dbMeta = conn.getMetaData();
+            dbProductName = dbMeta.getDatabaseProductName();
+        }
+        log.info("Database product: " + dbProductName);
+
+        SqlBackendRegistry backendRegistry = SqlBackendRegistry.get();
+
+        SqlBackendConfig backendConfig = backendRegistry.apply(dbProductName);
+        if(backendConfig == null) {
+            throw new RuntimeException("Could not find backend: [" + dbProductName + "]");
+        }
+
+
+        SqlCodec sqlEscaper = backendConfig.getSqlEscaper();
+        DatatypeToString typeSerializer = backendConfig.getTypeSerializer();
+
+        try (Connection conn = dataSource.getConnection()) {
+            BasicTableInfoProvider basicTableInfoProvider = new BasicTableProviderJdbc(conn);
+            SchemaProvider schemaProvider = new SchemaProviderImpl(
+                    basicTableInfoProvider,
+                    typeSystem,
+                    typeAlias,
+                    sqlEscaper);
+            SyntaxBridge syntaxBridge = new SyntaxBridge(schemaProvider);
+
+            //OpMappingRewriter opMappingRewriter = SparqlifyUtils.createDefaultOpMappingRewriter(typeSystem);
+            //MappingOps mappingOps = SparqlifyUtils.createDefaultMappingOps(typeSystem);
+            MappingOps mappingOps = SparqlifyUtils.createDefaultMappingOps(ers);
+            //OpMappingRewriter opMappingRewriter = new OpMappingRewriterImpl(mappingOps);
+
+
+            CandidateViewSelector<ViewDefinition> candidateViewSelector = new CandidateViewSelectorSparqlify(mappingOps, new ViewDefinitionNormalizerImpl());
+
+
+            //RdfViewSystem system = new RdfViewSystem2();
+            ConfiguratorCandidateSelector.configure(config, syntaxBridge, candidateViewSelector, loggerCount);
+        }
+
+        log.info("Errors: " + loggerCount.getErrorCount() + ", Warnings: " + loggerCount.getWarningCount());
+
+        if(loggerCount.getErrorCount() > 0) {
+            throw new RuntimeException("Encountered " + loggerCount.getErrorCount() + " errors that need to be fixed first.");
+        }
+
+
+        qef = FluentSparqlifyFactory.newEngine()
+                .setDataSource(dataSource)
+                .setConfig(config)
+                .setDatatypeToString(typeSerializer)
+                .setSqlEscaper(sqlEscaper) //SqlCodecUtils.createSqlCodecDefault())
+                .create();
+    }
+
+    public void s(String queryString) {
+        QueryEx queryEx = QueryFactoryEx.create(queryString);
+        if(queryEx.isSelectType()) {
+            QueryExecution qe = qef.createQueryExecution(queryEx);
+            ResultSet rs = qe.execSelect();
+            System.out.println(ResultSetFormatter.asText(rs));
+        }
+    }
+}
