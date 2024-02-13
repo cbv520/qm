@@ -1,0 +1,150 @@
+package mux41.its;
+
+import java.util.Arrays;
+import java.util.Iterator;
+
+public class CartesianProduct implements Iterator<int[]> {
+
+    private final int[] _lengths;
+    private final int[] _indices;
+    private boolean _hasNext = true;
+
+    public CartesianProduct(int[] lengths) {
+        _lengths = lengths;
+        _indices = new int[lengths.length];
+    }
+
+    public boolean hasNext() {
+        return _hasNext;
+    }
+
+    public int[] next() {
+        int[] result = Arrays.copyOf(_indices, _indices.length);
+        for (int i = _indices.length - 1; i >= 0; i--) {
+            if (_indices[i] == _lengths[i] - 1) {
+                _indices[i] = 0;
+                if (i == 0) {
+                    _hasNext = false;
+                }
+            } else {
+                _indices[i]++;
+                break;
+            }
+        }
+        return result;
+    }
+}
+---------------------------------------------------------------
+package mux41.its;
+
+import java.util.Arrays;
+import java.util.Comparator;
+import java.util.Iterator;
+
+public class SortedBufferIterator<T> implements Iterator<T> {
+
+    private Iterator<T> it;
+    private int bufferSize;
+    private Comparator<T> comparator;
+    private T[] buffer;
+    private int pos;
+    private int endPos;
+    private boolean lastBuffered;
+
+    public SortedBufferIterator(Iterator<T> it, int bufferSize, Comparator<T> comparator) {
+        this.it = it;
+        this.bufferSize = bufferSize;
+        this.comparator = comparator;
+        this.buffer = (T[]) new Object[bufferSize];
+        this.lastBuffered = false;
+        prefetch();
+    }
+
+    @Override
+    public boolean hasNext() {
+        return !lastBuffered || pos < endPos;
+    }
+
+    @Override
+    public T next() {
+        T t = buffer[pos++];
+        if (pos == endPos) {
+            prefetch();
+        }
+        return t;
+    }
+
+    private void prefetch() {
+        pos = 0;
+        int i = 0;
+        while (i < bufferSize) {
+            if (it.hasNext()) {
+                buffer[i++] = it.next();
+            } else {
+                lastBuffered = true;
+                break;
+            }
+        }
+        endPos = i;
+        if (lastBuffered && endPos < bufferSize) {
+            T[] temp = (T[]) new Object[endPos];
+            System.arraycopy(buffer, 0, temp, 0, endPos);
+            buffer = temp;
+        }
+        Arrays.sort(buffer, comparator);
+    }
+}
+---------------------------------------------------------------
+package mux41.its;
+
+import org.apache.jena.graph.Node;
+import org.apache.jena.sparql.core.Var;
+
+import java.util.*;
+
+public class NodeBindingIterator implements Iterator<Map<Node, Var>> {
+
+    private List<Node> nodes;
+    private List<List<Var>> varLists;
+    private Iterator<int[]> it;
+
+    public NodeBindingIterator(Map<Node, List<Var>> nodeBindings) {
+        this.nodes = new ArrayList<>(nodeBindings.keySet());
+        this.varLists = new ArrayList<>(nodeBindings.values());
+
+        int[] varListSizes = new int[varLists.size()];
+        for (int i = 0; i < varLists.size(); i++) {
+            varListSizes[i] = varLists.get(i).size();
+        }
+
+        it = new SortedBufferIterator<>(new CartesianProduct(varListSizes), 1000, Comparator.comparingDouble(this::scoreCombination));
+    }
+
+
+    @Override
+    public boolean hasNext() {
+        return it.hasNext();
+    }
+
+    @Override
+    public Map<Node, Var> next() {
+        var combination = it.next();
+        Map<Node, Var> binding = new HashMap<>();
+        for (int i = 0; i < combination.length; i++) {
+            var node = nodes.get(i);
+            var varLists = this.varLists.get(i);
+            var var = varLists.get(combination[i]);
+            binding.put(node, var);
+        }
+        return binding;
+    }
+
+    private <T> double scoreCombination(int[] combination) {
+        double res = 0;
+        for (int i : combination) {
+            res += Math.pow(10, i);
+        }
+        return res;
+    }
+}
+---------------------------------------------------------------
