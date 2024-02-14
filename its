@@ -148,3 +148,36 @@ public class NodeBindingIterator implements Iterator<Map<Node, Var>> {
     }
 }
 ---------------------------------------------------------------
+package mux41.its;
+
+import java.util.*;
+
+public class SortedBufferIterator<T> implements Iterator<T> {
+
+    private Iterator<T> it;
+    private Queue<T> buffer;
+
+    public SortedBufferIterator(Iterator<T> it, int bufferSize, Comparator<T> comparator) {
+        this.it = it;
+        this.buffer = new PriorityQueue<>(bufferSize+1, comparator);
+
+        int i = 0;
+        while (it.hasNext() && i < bufferSize) {
+            buffer.add(it.next());
+            i++;
+        }
+    }
+
+    @Override
+    public boolean hasNext() {
+        return !buffer.isEmpty();
+    }
+
+    @Override
+    public T next() {
+        if (it.hasNext()) {
+            buffer.add(it.next());
+        }
+        return buffer.poll();
+    }
+}
