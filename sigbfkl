@@ -1,0 +1,102 @@
+package mux41.data.service.services;
+
+import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
+import net.sf.jsqlparser.JSQLParserException;
+import net.sf.jsqlparser.parser.CCJSqlParserUtil;
+import net.sf.jsqlparser.schema.Table;
+import net.sf.jsqlparser.statement.create.view.CreateView;
+import net.sf.jsqlparser.statement.select.PlainSelect;
+import org.apache.commons.lang3.StringUtils;
+import org.hibernate.resource.jdbc.spi.StatementInspector;
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.stereotype.Service;
+
+import java.sql.DriverManager;
+import java.sql.SQLException;
+import java.util.function.Supplier;
+
+@Service
+@RequiredArgsConstructor
+@Slf4j
+public class SqlViewService {
+
+    @Value("${spring.datasource.url}")
+    private String sqlUrl;
+
+    @Value("${spring.datasource.username}")
+    private String sqlUsername;
+
+    @Value("${spring.datasource.password}")
+    private String sqlPassword;
+
+    @Value("${service.default-view:#{null}}")
+    private String defaultView;
+
+    private final ThreadLocal<String> threadCurrentView = new ThreadLocal<>();
+
+    public void addView(String viewStmt) throws SQLException {
+        try {
+            addView((CreateView) CCJSqlParserUtil.parse(viewStmt));
+        } catch (JSQLParserException | ClassCastException e) {
+            throw new SQLException("Invalid CREATE VIEW statement", e);
+        }
+    }
+
+    public void addView(CreateView viewStmt) throws SQLException {
+        try (var conn = DriverManager.getConnection(sqlUrl, sqlUsername, sqlPassword);
+             var stmt = conn.createStatement()) {
+            var selectFrom = viewStmt.getSelect().getPlainSelect().getFromItem();
+            if (selectFrom instanceof Table && ((Table) selectFrom).getName().equalsIgnoreCase("persons")) {
+                ((Table) selectFrom).setName("persons");
+                viewStmt.getView().setName(viewStmt.getView().getName().toLowerCase());
+                stmt.execute(viewStmt.toString());
+            } else {
+                throw new IllegalArgumentException();
+            }
+        }
+    }
+
+    public <T> T executeWithView(String viewName, Supplier<T> exec) {
+        try {
+            if (StringUtils.isBlank(viewName)) {
+                viewName = defaultView;
+            }
+            this.threadCurrentView.set(viewName);
+            return exec.get();
+        } finally {
+            threadCurrentView.set(null);
+        }
+    }
+
+    public StatementInspector sqlInspector() {
+        return new ApplyViewInspector();
+    }
+
+    public class ApplyViewInspector implements StatementInspector {
+
+        @Override
+        public String inspect(String sql) {
+            var currentView = threadCurrentView.get();
+            if (currentView != null) {
+                try {
+                    var stmt = CCJSqlParserUtil.parse(sql);
+                    if (stmt instanceof PlainSelect) {
+                        PlainSelect select = (PlainSelect) stmt;
+                        var alias = select.getFromItem().getAlias();
+                        var table = new Table(currentView.toLowerCase());
+                        table.setAlias(alias);
+                        select.setFromItem(table);
+                        var newSql = select.toString();
+                        log.info("applying view: {} -> {}", sql, newSql);
+                        sql = newSql;
+                    }
+                } catch (JSQLParserException e) {
+                    throw new RuntimeException(e);
+                }
+            }
+            return sql;
+        }
+
+    }
+}
