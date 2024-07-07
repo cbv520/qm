@@ -1,0 +1,194 @@
+import { Component } from '@angular/core';
+
+@Component({
+  selector: 'app-root',
+  templateUrl: './app.component.html',
+  styleUrls: ['./app.component.scss']
+})
+export class AppComponent {
+  title = 'dashboard';
+
+  constructor() {
+    console.log("CONFIRMED")
+
+
+    console.log(new PlanDrawer({
+      id: 'my-play',
+      processors: [
+        {
+          serviceId: 'a',
+        },
+        {
+          serviceId: 'b',
+        },
+        {
+          serviceId: 'c',
+        },
+        {
+          serviceId: 'd',
+        },
+      ],
+      connections: [
+        {topic: '1', destination: {instance: 0, endpoint: "in"}},
+        {topic: '2', source: {instance: 0, endpoint: "out"}, destination: {instance: 2, endpoint: "in"}},
+        {topic: '3', source: {instance: 0, endpoint: "out"}, destination: {instance: 1, endpoint: "in"}},
+        {topic: '4', source: {instance: 1, endpoint: "out"}, destination: {instance: 2, endpoint: "in"}},
+        {topic: '5', source: {instance: 2, endpoint: "out"}},
+        {topic: '6', source: {instance: 3, endpoint: "out"}},
+      ]
+    }).draw());
+  }
+}
+
+interface Plan {
+  id: string,
+  processors: Processor[],
+  connections: Connection[]
+}
+
+interface Processor {
+  serviceId: string
+}
+
+interface Source {
+  instance: number,
+  endpoint: string
+}
+
+interface Destination {
+  instance: number,
+  endpoint: string
+}
+
+interface Connection {
+  topic: string,
+  source?: Source,
+  destination?: Destination
+}
+
+interface AnalyticNode {
+  id: string,
+  name: string,
+  inputs: string[],
+  outputs: string[],
+  planIdx: number,
+}
+
+class PlanDrawer {
+
+  cyElements: any = null;
+  analytics: AnalyticNode[] = [];
+  heads: AnalyticNode[] = [];
+  graph: {[idx: number]: AnalyticNode}[] = [];
+  analyticDependencies: {[idx: number]: Source[]} = {};
+
+  constructor(private plan: Plan) {}
+
+  draw() {
+    if (this.cyElements) {
+      return this.cyElements;
+    }
+
+    this.processPlan();
+    this.makeGraph();
+    return this.createCyGraph();
+  }
+
+  processPlan() {
+    this.analytics = this.plan.processors.map((proc, planIdx) => {
+      return {
+        id: this.plan.id + proc.serviceId  + planIdx,
+        name: proc.serviceId,
+        inputs: [],
+        outputs: [],
+        planIdx
+      }
+    });
+
+    let heads: {[id: string]: AnalyticNode} = {};
+
+    this.plan.connections.forEach(conn => {
+
+      // add output endpoints to an anlytic node based on connection sources
+      if (conn.source) {
+        let outputs = this.analytics[conn.source.instance].outputs;
+        if (!outputs.includes(conn.source.endpoint)) {
+          outputs.push(conn.source.endpoint)
+        }
+      }
+
+      // add input endpoints to an anlytic node based on connection destinations
+      if (conn.destination) {
+        let inputs = this.analytics[conn.destination.instance].inputs;
+        if (!inputs.includes(conn.destination.endpoint)) {
+          inputs.push(conn.destination.endpoint)
+        }
+      } else if (conn.source) {
+        // add head analytics with an output topic
+        let headAnalytic = this.analytics[conn.source.instance];
+        heads[headAnalytic.name] = headAnalytic;
+      }
+
+      // determine analytic dependency endpoint
+      if (conn.source && conn.destination) {
+        if (!this.analyticDependencies[conn.destination.instance]) {
+          this.analyticDependencies[conn.destination.instance] = []
+        }
+        this.analyticDependencies[conn.destination.instance].push(conn.source)
+      }
+    })
+
+    // add head analytics without an output topic
+    this.analytics
+        .filter(a => a.outputs.length === 0)
+        .forEach(a => heads[a.name] = a);
+
+    this.heads = Object.values(heads);
+  }
+
+  makeGraph() {
+    this.heads.forEach(headAnalytic => this.makeGraphRec(headAnalytic, 0))
+  }
+
+  makeGraphRec(analytic: AnalyticNode, level: number) {
+    let analyticsForLevel: {[idx: number]: AnalyticNode} = {};
+
+    // get the map of services at the current level
+    if (level === this.graph.length) {
+      this.graph.push(analyticsForLevel);
+    } else {
+      analyticsForLevel = this.graph[level];
+    }
+
+    analyticsForLevel[analytic.planIdx] = analytic;
+
+    // ensure service is at the highest (furthest from head) level by deleting it from 
+    // lower levels if its a dependency analytics from multiple lower levels. This prevents backwards arrows.
+    for (var i = 0; i < level; i++) {
+      delete this.graph[i][analytic.planIdx]
+    }
+
+    let depsForAnalytic = this.analyticDependencies[analytic.planIdx];
+
+    // recursively make graph by traversing dependencies
+    if (depsForAnalytic) {
+      depsForAnalytic.forEach(src => {
+        this.makeGraphRec(this.analytics[src.instance], level + 1)
+      });
+    }
+  }
+  
+  createCyGraph() {
+    let s = "";
+
+    this.graph.forEach((level, idx) => {
+      s += idx + "\n";
+      Object.values(level).forEach(analytic => {
+        s += analytic.id + "\n";
+      });
+      s += "=============";
+    });
+
+    return s;
+  }
+}
