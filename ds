@@ -1,0 +1,71 @@
+package mux41.data.service.services;
+
+import java.sql.ResultSet;
+import java.sql.SQLException;
+import java.util.HashMap;
+import java.util.Iterator;
+import java.util.Map;
+
+public abstract class JdbcBaseImpl extends AService<Map<String, Object>> {
+    
+    @Override
+    public Iterator<Map<String, Object>> _fetch() {
+        return new ResultSetToJsonIterator(_dbFetch());
+    }
+
+    @Override
+    public Map<String, Object> _map(Map<String, Object> json) {
+        return json;
+    }
+    
+    public abstract ResultSet _dbFetch();
+    
+    public static class ResultSetToJsonIterator implements Iterator<Map<String, Object>> {
+
+        private ResultSet rs;
+        private String[] colNames;
+        private boolean hasNext = false;
+        private Map<String, Object> next = null;
+
+        public ResultSetToJsonIterator(ResultSet rs) {
+            try {
+                this.rs = rs;
+                var rsMeta = rs.getMetaData();
+                int ncols = rsMeta.getColumnCount();
+                this.colNames = new String[ncols];
+                for (int i = 0; i < ncols; i++) {
+                    this.colNames[i] = rsMeta.getColumnLabel(i);
+                }
+                prefetchNext();
+            } catch (SQLException e) {
+                throw new RuntimeException(e);
+            }
+        }
+
+        @Override
+        public boolean hasNext() {
+            return this.hasNext;
+        }
+
+        @Override
+        public Map<String, Object> next() {
+            Map<String, Object> next = this.next;
+            prefetchNext();
+            return next;
+        }
+
+        private void prefetchNext() {
+            try {
+                this.hasNext = this.rs.next();
+                if (this.hasNext) {
+                    this.next = new HashMap<>();
+                    for (int i = 0; i < this.colNames.length; i++) {
+                        this.next.put(this.colNames[i], this.rs.getObject(i));
+                    }
+                }
+            } catch (SQLException e) {
+                throw new RuntimeException(e);
+            }
+        }
+    } 
+}
